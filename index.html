@@ -15,7 +15,7 @@
   #status {
     position: absolute; left: 6px; top: 6px; z-index: 10;
     font: 14px monospace; color: #fff; background: rgba(0,0,0,0.7);
-    padding: 4px 8px; display: none;
+    padding: 4px 8px; display: none; white-space: pre;
   }
 </style>
 </head>
@@ -23,54 +23,103 @@
 <div class="wrap">
   <video id="idle" src="idle.webm" muted loop autoplay playsinline class="active"></video>
   <video id="jump" src="jump.webm" muted playsinline></video>
+  <video id="special" src="special.webm" muted playsinline preload="auto"></video>
   <div id="status"></div>
 </div>
 
 <script>
+  // ===== НАСТРОЙКИ =====
   // Сколько миллисекунд после последнего лайка продолжать прыгать
   const HOLD_MS = 1500;
+  // Слова из чата, которые запускают третье видео (пиши маленькими буквами)
+  const CHAT_TRIGGERS = ['ww', 'дабулюдабулю'];
+  // true: сообщение должно целиком совпадать со словом
+  // false: достаточно, чтобы слово встречалось внутри сообщения
+  const MATCH_EXACT = true;
+  // ======================
 
-  const idle = document.getElementById('idle');
-  const jump = document.getElementById('jump');
+  const videos = {
+    idle: document.getElementById('idle'),
+    jump: document.getElementById('jump'),
+    special: document.getElementById('special'),
+  };
   const statusEl = document.getElementById('status');
 
   // Строка статуса видна только при ?debug=1 в конце ссылки
   const DEBUG = new URLSearchParams(location.search).has('debug');
   if (DEBUG) statusEl.style.display = 'block';
-  function setStatus(text) { if (DEBUG) statusEl.textContent = text; }
-  setStatus('WS: connecting...');
 
+  let wsState = 'connecting...';
+  let lastEvent = '-';
+  let lastChat = '-';
+  function render() {
+    if (DEBUG) {
+      statusEl.textContent =
+        'WS: ' + wsState +
+        '\nlast event: ' + lastEvent +
+        '\nlast chat: ' + lastChat;
+    }
+  }
+  render();
+
+  let mode = 'idle';
   let lastLike = 0;
-  let jumping = false;
 
-  function startJump() {
-    jumping = true;
-    jump.currentTime = 0;
-    jump.play();
-    jump.classList.add('active');
-    idle.classList.remove('active');
+  // Показать нужное видео: idle, jump или special
+  function show(newMode) {
+    mode = newMode;
+    for (const name of ['jump', 'special']) {
+      const v = videos[name];
+      if (name === newMode) {
+        v.currentTime = 0;
+        v.play();
+        v.classList.add('active');
+      } else {
+        v.pause();
+        v.classList.remove('active');
+      }
+    }
+    if (newMode === 'idle') videos.idle.classList.add('active');
+    else videos.idle.classList.remove('active');
   }
 
-  function stopJump() {
-    jumping = false;
-    jump.pause();
-    jump.classList.remove('active');
-    idle.classList.add('active');
+  function recentLikes() {
+    return Date.now() - lastLike < HOLD_MS;
   }
 
   function onLike() {
     lastLike = Date.now();
-    if (!jumping) startJump();
+    if (mode === 'idle') show('jump');
   }
 
-  jump.addEventListener('ended', () => {
-    if (Date.now() - lastLike < HOLD_MS) {
-      jump.currentTime = 0;
-      jump.play();
+  function onSpecial() {
+    if (mode === 'special') return; // пока играет, новые слова игнорируем
+    show('special');
+  }
+
+  // Jump доиграл: если лайки были недавно, повторяем, иначе idle
+  videos.jump.addEventListener('ended', () => {
+    if (mode !== 'jump') return;
+    if (recentLikes()) {
+      videos.jump.currentTime = 0;
+      videos.jump.play();
     } else {
-      stopJump();
+      show('idle');
     }
   });
+
+  // Special доиграл: возвращаемся в jump, если лайки идут, иначе в idle
+  videos.special.addEventListener('ended', () => {
+    if (mode !== 'special') return;
+    show(recentLikes() ? 'jump' : 'idle');
+  });
+
+  // Проверка, что сообщение чата подходит
+  function matchesTrigger(text) {
+    const t = text.trim().toLowerCase().replace(/[\s.!?,]+$/g, '');
+    if (!t) return false;
+    return CHAT_TRIGGERS.some((w) => (MATCH_EXACT ? t === w : t.includes(w)));
+  }
 
   // Подключение к TikFinity
   function connect() {
@@ -78,28 +127,36 @@
     try {
       ws = new WebSocket('ws://localhost:21213/');
     } catch (err) {
-      setStatus('WS: error ' + err.message);
+      wsState = 'error ' + err.message;
+      render();
       setTimeout(connect, 2000);
       return;
     }
-    ws.onopen = () => setStatus('WS: connected');
+    ws.onopen = () => { wsState = 'connected'; render(); };
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
+        lastEvent = msg.event + ' ' + new Date().toLocaleTimeString();
         if (msg.event === 'like') {
           onLike();
-          setStatus('WS: like received ' + new Date().toLocaleTimeString());
+        } else if (msg.event === 'chat') {
+          const d = msg.data || {};
+          const text = String(d.comment || d.text || '');
+          lastChat = text;
+          if (matchesTrigger(text)) onSpecial();
         }
+        render();
       } catch (err) {}
     };
-    ws.onclose = () => { setStatus('WS: closed, retrying'); setTimeout(connect, 2000); };
+    ws.onclose = () => { wsState = 'closed, retrying'; render(); setTimeout(connect, 2000); };
     ws.onerror = () => ws.close();
   }
   connect();
 
-  // Тест без стрима: нажми пробел в браузере, чтобы имитировать лайк
+  // Тест без стрима: пробел имитирует лайк, клавиша S запускает третье видео
   document.addEventListener('keydown', (e) => {
     if (e.code === 'Space') onLike();
+    if (e.code === 'KeyS') onSpecial();
   });
 </script>
 </body>
