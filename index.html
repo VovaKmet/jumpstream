@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  .wrap { position: relative; width: 100vw; height: 100vh; }
+  video {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: contain;
+    opacity: 0;
+  }
+  video.active { opacity: 1; }
+  #status {
+    position: absolute; left: 6px; top: 6px; z-index: 10;
+    font: 14px monospace; color: #fff; background: rgba(0,0,0,0.7);
+    padding: 4px 8px; display: none;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <video id="idle" src="idle.webm" muted loop autoplay playsinline class="active"></video>
+  <video id="jump" src="jump.webm" muted playsinline></video>
+  <div id="status"></div>
+</div>
+
+<script>
+  // Сколько миллисекунд после последнего лайка продолжать прыгать
+  const HOLD_MS = 1500;
+
+  const idle = document.getElementById('idle');
+  const jump = document.getElementById('jump');
+  const statusEl = document.getElementById('status');
+
+  // Строка статуса видна только при ?debug=1 в конце ссылки
+  const DEBUG = new URLSearchParams(location.search).has('debug');
+  if (DEBUG) statusEl.style.display = 'block';
+  function setStatus(text) { if (DEBUG) statusEl.textContent = text; }
+  setStatus('WS: connecting...');
+
+  let lastLike = 0;
+  let jumping = false;
+
+  function startJump() {
+    jumping = true;
+    jump.currentTime = 0;
+    jump.play();
+    jump.classList.add('active');
+    idle.classList.remove('active');
+  }
+
+  function stopJump() {
+    jumping = false;
+    jump.pause();
+    jump.classList.remove('active');
+    idle.classList.add('active');
+  }
+
+  function onLike() {
+    lastLike = Date.now();
+    if (!jumping) startJump();
+  }
+
+  jump.addEventListener('ended', () => {
+    if (Date.now() - lastLike < HOLD_MS) {
+      jump.currentTime = 0;
+      jump.play();
+    } else {
+      stopJump();
+    }
+  });
+
+  // Подключение к TikFinity
+  function connect() {
+    let ws;
+    try {
+      ws = new WebSocket('ws://localhost:21213/');
+    } catch (err) {
+      setStatus('WS: error ' + err.message);
+      setTimeout(connect, 2000);
+      return;
+    }
+    ws.onopen = () => setStatus('WS: connected');
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.event === 'like') {
+          onLike();
+          setStatus('WS: like received ' + new Date().toLocaleTimeString());
+        }
+      } catch (err) {}
+    };
+    ws.onclose = () => { setStatus('WS: closed, retrying'); setTimeout(connect, 2000); };
+    ws.onerror = () => ws.close();
+  }
+  connect();
+
+  // Тест без стрима: нажми пробел в браузере, чтобы имитировать лайк
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') onLike();
+  });
+</script>
+</body>
+</html>
